@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Infinite Scroll</title>
+    <style>
+      *, *::before, *::after { box-sizing: border-box; }
+
+      body {
+        font-family: system-ui, -apple-system, sans-serif;
+        background: #f4f4f5;
+        margin: 0;
+        padding: 0;
+      }
+
+      header {
+        background: #fff;
+        border-bottom: 1px solid #e4e4e7;
+        padding: 16px 24px;
+        position: sticky;
+        top: 0;
+        z-index: 10;
+      }
+
+      header h1 {
+        margin: 0;
+        font-size: 1.25rem;
+        color: #18181b;
+      }
+
+      #feed {
+        max-width: 680px;
+        margin: 24px auto;
+        padding: 0 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .card {
+        background: #fff;
+        border: 1px solid #e4e4e7;
+        border-radius: 8px;
+        padding: 16px 20px;
+        animation: fadeIn 0.25s ease;
+      }
+
+      @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(6px); }
+        to   { opacity: 1; transform: translateY(0); }
+      }
+
+      .card-meta {
+        font-size: 0.75rem;
+        color: #71717a;
+        margin-bottom: 6px;
+      }
+
+      .card-title {
+        font-size: 1rem;
+        font-weight: 600;
+        color: #18181b;
+        margin: 0 0 8px;
+        text-transform: capitalize;
+      }
+
+      .card-body {
+        font-size: 0.9rem;
+        color: #52525b;
+        line-height: 1.55;
+        margin: 0;
+      }
+
+      #sentinel {
+        max-width: 680px;
+        margin: 0 auto 48px;
+        padding: 24px 16px;
+        text-align: center;
+        color: #71717a;
+        font-size: 0.9rem;
+      }
+
+      .spinner {
+        display: inline-block;
+        width: 20px;
+        height: 20px;
+        border: 2px solid #d4d4d8;
+        border-top-color: #6366f1;
+        border-radius: 50%;
+        animation: spin 0.7s linear infinite;
+        vertical-align: middle;
+        margin-right: 8px;
+      }
+
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+
+      #statusText { vertical-align: middle; }
+    </style>
+  </head>
+
+  <body>
+    <header>
+      <h1>Infinite Scroll Demo</h1>
+    </header>
+
+    <div id="feed"></div>
+
+    <div id="sentinel">
+      <span class="spinner" id="spinner"></span>
+      <span id="statusText">Loading…</span>
+    </div>
+
+    <script>
+      const feedEl     = document.getElementById("feed");
+      const sentinelEl = document.getElementById("sentinel");
+      const spinnerEl  = document.getElementById("spinner");
+      const statusEl   = document.getElementById("statusText");
+
+      const PAGE_SIZE = 20;
+      const MAX_PAGES = 500;  // 500 × 20 = 10 000 items
+
+      let page       = 0;
+      let isLoading  = false;
+      let isDone     = false;
+      let controller = null;
+
+      // ---- helpers ----
+
+      function escapeHtml(s) {
+        return String(s)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#039;");
+      }
+
+      function setStatus(text, showSpinner = false) {
+        statusEl.textContent = text;
+        spinnerEl.style.display = showSpinner ? "inline-block" : "none";
+      }
+
+      function renderCards(items) {
+        const frag = document.createDocumentFragment();
+        for (const item of items) {
+          const card = document.createElement("article");
+          card.className = "card";
+          card.innerHTML = `
+            <div class="card-meta">Post #${item.id} &middot; User ${item.userId}</div>
+            <h2 class="card-title">${escapeHtml(item.title)}</h2>
+            <p class="card-body">${escapeHtml(item.body)}</p>
+          `;
+          frag.appendChild(card);
+        }
+        feedEl.appendChild(frag);
+      }
+
+      // ---- data fetching ----
+
+      // Each page is a separate file — only the 20 items needed are fetched.
+      async function fetchPage(pageIndex, signal) {
+        const res = await fetch(`/pages/${pageIndex}.json`, {
+          signal,
+          headers: { Accept: "application/json" },
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      }
+
+      // ---- load logic ----
+
+      async function loadNextPage() {
+        if (isLoading || isDone) return;
+        if (page >= MAX_PAGES) {
+          isDone = true;
+          setStatus("You've reached the end.", false);
+          return;
+        }
+
+        isLoading = true;
+        setStatus("Loading…", true);
+
+        if (controller) controller.abort();
+        controller = new AbortController();
+
+        try {
+          const items = await fetchPage(page, controller.signal);
+
+          if (!items.length) {
+            isDone = true;
+            setStatus("You've reached the end.", false);
+            return;
+          }
+
+          renderCards(items);
+          page += 1;
+
+          // Hide spinner once all pages are loaded
+          if (page >= MAX_PAGES) {
+            isDone = true;
+            setStatus("You've reached the end.", false);
+          } else {
+            setStatus("", true);
+          }
+        } catch (err) {
+          if (err.name === "AbortError") return;
+          setStatus(`Error: ${err.message} — scroll to retry`, false);
+        } finally {
+          isLoading = false;
+        }
+      }
+
+      // ---- IntersectionObserver ----
+
+      const observer = new IntersectionObserver(
+        (entries) => {
+          if (entries.some((e) => e.isIntersecting)) loadNextPage();
+        },
+        {
+          root: null,
+          rootMargin: "400px 0px",
+          threshold: 0,
+        }
+      );
+
+      observer.observe(sentinelEl);
+
+      // kick off the first load immediately
+      loadNextPage();
+    </script>
+  </body>
+</html>
