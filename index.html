@@ -17,17 +17,70 @@
       header {
         background: #fff;
         border-bottom: 1px solid #e4e4e7;
-        padding: 16px 24px;
+        padding: 12px 24px;
         position: sticky;
         top: 0;
         z-index: 10;
+        display: flex;
+        align-items: center;
+        gap: 16px;
       }
 
       header h1 {
         margin: 0;
-        font-size: 1.25rem;
+        font-size: 1.1rem;
         color: #18181b;
+        white-space: nowrap;
       }
+
+      #search-wrap {
+        flex: 1;
+        max-width: 420px;
+        position: relative;
+      }
+
+      #search-wrap svg {
+        position: absolute;
+        left: 10px;
+        top: 50%;
+        transform: translateY(-50%);
+        color: #71717a;
+        pointer-events: none;
+      }
+
+      #searchInput {
+        width: 100%;
+        padding: 8px 32px 8px 34px;
+        border: 1px solid #e4e4e7;
+        border-radius: 6px;
+        font-size: 0.9rem;
+        outline: none;
+        background: #f4f4f5;
+        color: #18181b;
+        transition: border-color 0.15s, background 0.15s;
+      }
+
+      #searchInput:focus {
+        border-color: #6366f1;
+        background: #fff;
+      }
+
+      #clearBtn {
+        position: absolute;
+        right: 8px;
+        top: 50%;
+        transform: translateY(-50%);
+        background: none;
+        border: none;
+        cursor: pointer;
+        color: #71717a;
+        padding: 2px;
+        display: none;
+        line-height: 1;
+        font-size: 1rem;
+      }
+
+      #clearBtn:hover { color: #18181b; }
 
       #feed {
         max-width: 680px;
@@ -43,7 +96,7 @@
         border: 1px solid #e4e4e7;
         border-radius: 8px;
         padding: 16px 20px;
-        animation: fadeIn 0.25s ease;
+        animation: fadeIn 0.2s ease;
       }
 
       @keyframes fadeIn {
@@ -70,6 +123,12 @@
         color: #52525b;
         line-height: 1.55;
         margin: 0;
+      }
+
+      mark {
+        background: #fef08a;
+        border-radius: 2px;
+        padding: 0 1px;
       }
 
       #sentinel {
@@ -103,7 +162,16 @@
 
   <body>
     <header>
-      <h1>Infinite Scroll Demo</h1>
+      <h1>Infinite Scroll</h1>
+      <div id="search-wrap">
+        <!-- search icon -->
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        <input id="searchInput" type="search" placeholder="Search posts…" autocomplete="off" />
+        <button id="clearBtn" aria-label="Clear search">&#x2715;</button>
+      </div>
     </header>
 
     <div id="feed"></div>
@@ -114,20 +182,33 @@
     </div>
 
     <script>
-      const feedEl     = document.getElementById("feed");
-      const sentinelEl = document.getElementById("sentinel");
-      const spinnerEl  = document.getElementById("spinner");
-      const statusEl   = document.getElementById("statusText");
+      const feedEl        = document.getElementById("feed");
+      const sentinelEl    = document.getElementById("sentinel");
+      const spinnerEl     = document.getElementById("spinner");
+      const statusEl      = document.getElementById("statusText");
+      const searchInput   = document.getElementById("searchInput");
+      const clearBtn      = document.getElementById("clearBtn");
 
       const PAGE_SIZE = 20;
       const MAX_PAGES = 500;  // 500 × 20 = 10 000 items
 
-      let page       = 0;
-      let isLoading  = false;
-      let isDone     = false;
-      let controller = null;
+      // ── mode state ──────────────────────────────────────────────────────────
+      // "normal" mode: fetch per-page files
+      // "search" mode: filter in-memory index, page through results
+      let mode        = "normal";   // "normal" | "search"
+      let page        = 0;
+      let isLoading   = false;
+      let isDone      = false;
+      let controller  = null;
 
-      // ---- helpers ----
+      // search state
+      let searchResults = [];   // filtered items
+      let searchPage    = 0;    // cursor into searchResults
+
+      // lazy-loaded full index (only fetched when user first searches)
+      let _searchIndex  = null;
+
+      // ── helpers ─────────────────────────────────────────────────────────────
 
       function escapeHtml(s) {
         return String(s)
@@ -138,29 +219,46 @@
           .replace(/'/g, "&#039;");
       }
 
+      // Wrap every occurrence of `term` in <mark> within an already-escaped string
+      function highlight(escaped, term) {
+        if (!term) return escaped;
+        const re = new RegExp(escapeHtml(term).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+        return escaped.replace(re, (m) => `<mark>${m}</mark>`);
+      }
+
       function setStatus(text, showSpinner = false) {
         statusEl.textContent = text;
         spinnerEl.style.display = showSpinner ? "inline-block" : "none";
       }
 
-      function renderCards(items) {
+      function renderCards(items, term = "") {
         const frag = document.createDocumentFragment();
         for (const item of items) {
           const card = document.createElement("article");
           card.className = "card";
+          const title = highlight(escapeHtml(item.title), term);
+          const body  = highlight(escapeHtml(item.body),  term);
           card.innerHTML = `
             <div class="card-meta">Post #${item.id} &middot; User ${item.userId}</div>
-            <h2 class="card-title">${escapeHtml(item.title)}</h2>
-            <p class="card-body">${escapeHtml(item.body)}</p>
+            <h2 class="card-title">${title}</h2>
+            <p class="card-body">${body}</p>
           `;
           frag.appendChild(card);
         }
         feedEl.appendChild(frag);
       }
 
-      // ---- data fetching ----
+      function resetFeed() {
+        feedEl.innerHTML = "";
+        page        = 0;
+        searchPage  = 0;
+        isLoading   = false;
+        isDone      = false;
+        if (controller) { controller.abort(); controller = null; }
+      }
 
-      // Each page is a separate file — only the 20 items needed are fetched.
+      // ── normal mode: fetch per-page files ───────────────────────────────────
+
       async function fetchPage(pageIndex, signal) {
         const res = await fetch(`/pages/${pageIndex}.json`, {
           signal,
@@ -170,9 +268,7 @@
         return res.json();
       }
 
-      // ---- load logic ----
-
-      async function loadNextPage() {
+      async function loadNextNormalPage() {
         if (isLoading || isDone) return;
         if (page >= MAX_PAGES) {
           isDone = true;
@@ -188,17 +284,13 @@
 
         try {
           const items = await fetchPage(page, controller.signal);
-
           if (!items.length) {
             isDone = true;
             setStatus("You've reached the end.", false);
             return;
           }
-
           renderCards(items);
           page += 1;
-
-          // Hide spinner once all pages are loaded
           if (page >= MAX_PAGES) {
             isDone = true;
             setStatus("You've reached the end.", false);
@@ -213,22 +305,123 @@
         }
       }
 
-      // ---- IntersectionObserver ----
+      // ── search mode: filter index, slice into virtual pages ─────────────────
+
+      async function getSearchIndex(signal) {
+        if (_searchIndex) return _searchIndex;
+        setStatus("Loading search index…", true);
+        const res = await fetch("/search-index.json", {
+          signal,
+          headers: { Accept: "application/json" },
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        _searchIndex = await res.json();
+        return _searchIndex;
+      }
+
+      async function loadNextSearchPage() {
+        if (isLoading || isDone) return;
+
+        isLoading = true;
+
+        if (controller) controller.abort();
+        controller = new AbortController();
+
+        try {
+          // First call in search mode: fetch index + run filter
+          if (searchPage === 0 && searchResults.length === 0) {
+            const index = await getSearchIndex(controller.signal);
+            const term  = searchInput.value.trim().toLowerCase();
+            searchResults = index.filter(
+              (item) =>
+                item.title.toLowerCase().includes(term) ||
+                item.body.toLowerCase().includes(term)
+            );
+            if (searchResults.length === 0) {
+              isDone = true;
+              setStatus(`No results for "${searchInput.value.trim()}"`, false);
+              return;
+            }
+          }
+
+          const term  = searchInput.value.trim();
+          const start = searchPage * PAGE_SIZE;
+          const slice = searchResults.slice(start, start + PAGE_SIZE);
+
+          if (!slice.length) {
+            isDone = true;
+            setStatus(`End of results (${searchResults.length} found)`, false);
+            return;
+          }
+
+          renderCards(slice, term);
+          searchPage += 1;
+
+          const total = searchResults.length;
+          const shown = Math.min(searchPage * PAGE_SIZE, total);
+
+          if (shown >= total) {
+            isDone = true;
+            setStatus(`${total} result${total !== 1 ? "s" : ""} — end reached`, false);
+          } else {
+            setStatus(`${total} result${total !== 1 ? "s" : ""} — scroll for more`, true);
+          }
+        } catch (err) {
+          if (err.name === "AbortError") return;
+          setStatus(`Error: ${err.message} — scroll to retry`, false);
+        } finally {
+          isLoading = false;
+        }
+      }
+
+      // ── unified entry point ──────────────────────────────────────────────────
+
+      function loadNextPage() {
+        if (mode === "search") loadNextSearchPage();
+        else                   loadNextNormalPage();
+      }
+
+      // ── search input handling ────────────────────────────────────────────────
+
+      let debounceTimer = null;
+
+      searchInput.addEventListener("input", () => {
+        clearBtn.style.display = searchInput.value ? "block" : "none";
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+          const term = searchInput.value.trim();
+          resetFeed();
+          if (term) {
+            mode = "search";
+            searchResults = [];   // force re-filter with new term
+            loadNextPage();
+          } else {
+            mode = "normal";
+            loadNextPage();
+          }
+        }, 300);
+      });
+
+      clearBtn.addEventListener("click", () => {
+        searchInput.value = "";
+        clearBtn.style.display = "none";
+        resetFeed();
+        mode = "normal";
+        loadNextPage();
+      });
+
+      // ── IntersectionObserver ─────────────────────────────────────────────────
 
       const observer = new IntersectionObserver(
         (entries) => {
           if (entries.some((e) => e.isIntersecting)) loadNextPage();
         },
-        {
-          root: null,
-          rootMargin: "400px 0px",
-          threshold: 0,
-        }
+        { root: null, rootMargin: "400px 0px", threshold: 0 }
       );
 
       observer.observe(sentinelEl);
 
-      // kick off the first load immediately
+      // kick off first load
       loadNextPage();
     </script>
   </body>
